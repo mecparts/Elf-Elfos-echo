@@ -1,0 +1,322 @@
+; -------------------------------------------------------------------
+; *** echo: trivial program to display the command tail
+; ***
+; *** Assembled with my modified version of the A18 assembler.
+; ***
+; *** Build #
+; ***  1: Initial version
+; *******************************************************************
+; *** This software is copyleft 2021 by Wayne Hortensius          ***
+; *** All wrongs reserved.                                        ***
+; *******************************************************************
+;
+	incl	"bios.inc"
+	incl	"kernel.inc"
+	
+orgAdr	equ	2000h
+;
+cr	equ	'M'-'@'
+lf	equ	'J'-'@'
+;
+; ************************************************************
+; This block generates the Execution header for a stand-alone
+; program. It begins 6 bytes before the program start.
+; ************************************************************
+;
+	org	orgAdr-6	; Header starts at 01ffah
+	dw	orgAdr
+	dw	endrom-OrgAdr
+	dw	OrgAdr
+;
+	lbr	Main
+; **************************************************
+; Build date format:
+; 80h+month, day, four digit year
+; **************************************************
+; 80h month offset indicates extended
+; build information, with build number and text.
+; **************************************************
+;
+date:	db	80h+7		; Month: July
+	db	22		; Day 22
+	dw	2021		; year = 2021
+;
+build:	dw	1		; build number
+	db	'@Copyleft 2021 Wayne Hortensius',0
+;
+Exit:
+	load	rf,saveStack	; restore Elf/OS's stack
+	lda	rf
+	phi	r2
+	ldn	rf
+	plo	r2
+	retn			; return to Elf/OS
+;-----------------------
+ShowHelp:
+	call	O_INMSG
+	db	'Usage: /bin/echo [OPTION]... [STRING]...',cr,lf
+	db	cr,lf
+	db	'Echo the STRING to standard output.',cr,lf
+	db	cr,lf
+	db	'  -n             do not output the trailing newline',cr,lf
+	db	'  -e             enable interpretation of backslash escapes',cr,lf
+	db	'  -E             disable interpretation of backslash escapes (default)',cr,lf
+	db	'      --help     display this help and exit',cr,lf
+	db	cr,lf
+	db	'If -e is in effect, the following sequences are recognized:',cr,lf
+	db	cr,lf
+	db	'  \\      backslash',cr,lf
+	db	'  \a      alert (BEL)',cr,lf
+	db	'  \b      backspace',cr,lf
+	db	'  \c      produce no further output',cr,lf
+	db	'  \e      escape',cr,lf
+	db	'  \f      form feed',cr,lf
+	db	'  \n      new line',cr,lf
+	db	'  \r      carriage return',cr,lf
+	db	'  \t      horizontal tab',cr,lf
+	db	'  \v      vertical tab',cr,lf
+	db	'  \0NNN   byte with octal value NNN (1 to 3 digits)',cr,lf
+	db	'  \xHH    byte with hexadecimal value HH (1 to 2 digits)',cr,lf,0
+	lbr	Exit
+;-----------------------
+Main:
+	load	rf,saveStack	; save Elf/OS's stack
+	ghi	r2
+	str	rf
+	inc	rf
+	glo	r2
+	str	rf
+	load	r2,localStack	; use our own stack
+;
+	ldi	0
+	plo	r8		; disable escape handling by default
+;
+	push	ra
+SkipSpaces:
+	lda	ra
+	lbz	Exit		; end of cmd tail
+	smi	' '		; look for non blank character
+	bz	SkipSpaces
+	dec	ra
+	push	ra
+	call	CmdTailCmp
+	db	'--help',0
+	lbz	ShowHelp
+	pop	ra
+	push	ra
+	call	CmdTailCmp
+	db	'-e',0
+	bz	EnableEsc
+	pop	ra
+	push	ra
+	call	CmdTailCmp
+	db	'-E',0
+	bz	DisableEsc
+	pop	ra
+	pop	ra		; no valid options found, show entire tail
+	br	EchoLoop
+EnableEsc:
+	ldi	1
+	plo	r8
+	irx			; 'pop ra' twice w/o actually doing it
+	irx
+	irx
+	irx
+	br	EchoLoop
+DisableEsc:
+	ldi	0
+	plo	r8
+	irx			; 'pop ra' twice w/o actually doing it
+	irx
+	irx
+	irx
+EchoLoop:
+	lda	ra
+	lbz	Exit
+	plo	r7
+	glo	r8		; escape handling enabled?
+	lbz	EchoR7		; nope!
+	glo	r7
+	smi	'\'
+	lbnz	EchoR7
+	lda	ra
+	smi	'0'		; \0 - octal character sequence
+	bnz	NotOctalSeq
+;
+	call	GetOctalDigit	; get first octal digit
+	bdf	EchoLoop	; DF=1, bad octal digit
+	plo	r7
+	call	GetOctalDigit	; try for second octal digit
+	lbdf	Backup
+	phi	r7
+	glo	r7
+	shl
+	shl
+	shl			; shift prev digit left 3 bits
+	str	r2
+	ghi	r7
+	or			; or in 2nd digit
+	plo	r7
+	call	GetOctalDigit	; try for 3rd octal digit
+	lbdf	Backup		; DF=1, bad octal digit
+	phi	r7
+	glo	r7
+	shl
+	shl
+	shl			; shift left 3 bits
+	str	r2
+	ghi	r7
+	or			; or 3nd digit
+	lbr	DoEcho
+	
+NotOctalSeq:
+	smi	'a'-'0'		; \a - bell
+	bnz	NotBell
+	ldi	7
+	lbr	DoEcho
+	
+NotBell:
+	smi	'b'-'a'		; \b - backspace
+	bnz	NotBackspace
+	ldi	'H'-'@'
+	lbr	DoEcho
+
+NotBackspace:
+	smi	'c'-'b'		; \c - produce no further output
+	lbz	Exit
+;
+	smi	'e'-'c'		; \e - escape
+	bnz	NotEscape
+	ldi	'['-'@'
+	lbr	DoEcho
+;
+NotEscape:
+	smi	'f'-'e'		; \f - form feed
+	bnz	NotFormFeed
+	ldi	'L'-'@'
+	lbr	DoEcho
+;
+NotFormFeed:
+	smi	'n'-'f'		; \n - new line
+	bnz	NotNewLine
+	ldi	'J'-'@'
+	lbr	DoEcho
+;
+NotNewLine:
+	smi	'r'-'n'		; \r - carriage return
+	bnz	NotCarrReturn
+	ldi	'M'-'@'
+	lbr	DoEcho
+;
+NotCarrReturn:
+	smi	't'-'r'		; \t - horizontal tab
+	lbnz	NotHTab
+	ldi	'I'-'@'
+	lbr	DoEcho
+;
+NotHTab:
+	smi	'v'-'t'		; \v - vertical tab
+	lbnz	NotVTab
+	ldi	'B'-'@'
+	lbr	DoEcho
+;
+NotVTab:
+	smi	'x'-'v'		; \x - hex character sequence
+	lbnz	EchoR7
+	call	GetHexDigit
+	lbdf	EchoLoop	; DF=1, bad hex digit
+	plo	r7
+	call	GetHexDigit
+	lbdf	Backup		; non hex digit, backup and output
+	phi	r7
+	glo	r7
+	shl
+	shl
+	shl
+	shl			; shift to msn
+	str	r2
+	ghi	r7
+	or			; or in lsn
+	br	DoEcho
+;
+Backup:
+	dec	ra		; back up 1 char
+EchoR7:
+	glo	r7
+DoEcho:
+	call	o_tty	
+	lbr	EchoLoop
+;--------------------------------
+GetOctalDigit:
+	lda	ra
+	smi	'0'
+	lbnf	BadDigit	; < '0', bad
+	smi	8
+	lbdf	BadDigit
+	adi	8		; it was 0-7
+	adi	0		; DF=0, good octal digit
+	retn
+BadDigit:
+	smi	0		; DF=1, bad octal or hex digit
+	retn
+;--------------------------------
+GetHexDigit:
+	lda	ra
+	smi	'0'
+	lbnf	BadDigit	; < '0', bad
+	smi	10
+	lbdf	TryAF
+	adi	10		; it was 0-9
+	adi	0		; DF=0, good hex digit
+	retn
+TryAF:	adi	'0'+10
+	ani	05FH		; make uppercase
+	smi	'A'
+	lbnf	BadDigit	; < 'A', bad
+	smi	6
+	lbdf	BadDigit	; > 'F', bad
+	adi	0AH+6		; it was A-F
+	adi	0		; DF=0, good hex digit
+	retn
+;--------------------------------
+; CmdTailCmp compares the inline string with that pointed to by R(A) 
+; Returns:
+;     R(A)  = R(6)    Z=1, DF=0
+;     R(A) != R(6)    Z=0, DF=1
+; Modifies:
+;     RA, R6
+CmdTailCmp:
+	lda	r6		; get next byte in inline string
+	ani	0ffh		; check for zero
+	bz	CmdTailEq	; found end of inline string
+	stxd			; store into memory
+	irx
+	lda	ra		; get char from cmd tail
+	sm			; subtract inline char from it
+	bz      CmdTailCmp	; so far a match, keep looking
+SkipRemainder:
+	lda	r6
+	bnz	SkipRemainder
+	ldi	1
+	smi	0		; Z=0, DF=1, no match
+	retn
+CmdTailEq:
+	ldi	0
+	adi	0		; Z=1, DF=0, match
+	retn
+;
+;------------------------
+;	
+endrom	equ	$
+;
+;------------------------
+;
+	ds	64
+localStack:
+	ds	1
+saveStack:
+	ds	2
+;
+buffer	equ	$
+;
+	end
